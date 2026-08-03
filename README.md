@@ -11,7 +11,7 @@ No install, no server, no network. Requires WebGL2 with float render targets
 (any modern desktop GPU).
 
 **Share it:** the folder is GitHub Pages-ready as-is — push it to a repo, enable
-Pages, done.
+Pages, done. Anyone is free to edit and redistribute the code; I made it to share.
 
 ## Using it
 

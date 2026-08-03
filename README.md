@@ -5,7 +5,8 @@ depth-averaged equations real tsunami models use) on a GPU grid, over procedural
 generated coastal terrain, with an orbitable 3D view, an overhead topo view, and a
 record-and-scrub replay timeline.
 
-**Run it:** open `index.html` in a modern desktop browser (Chrome/Edge/Firefox).
+**Run it:** Either go to https://snowstar38.github.io/Tsunami-Lab/ or download the repo
+and open `index.html` in a modern desktop browser (Chrome/Edge/Firefox).
 No install, no server, no network. Requires WebGL2 with float render targets
 (any modern desktop GPU).
 

@@ -13,6 +13,11 @@ TS.importer = (function () {
 
   var PREVIEW_N = 256;          // working resolution while you drag things
   var SRC_MAX = 420;            // source preview is downscaled to this many px
+  // GMRT download cost scales with AREA, so width is quadratic: ~8 s for a 40 km
+  // box at finest detail means ~50 s at 100 km. Cap it before people sit through
+  // a two-minute wait that then times out.
+  var MAX_KM = 120;
+  var SLOW_KM = 80;
   var PAD = 30;                 // breathing room around it, so the incoming-wave
                                 // arrows have somewhere to live even when the
                                 // crop box is fitted to the whole image
@@ -107,6 +112,10 @@ TS.importer = (function () {
     '#ts-imp .drop b { color:#dfe3ea; display:block; font-size:13px; margin-bottom:5px; }',
     '#ts-imp .drop.slim { padding:9px 12px; font-size:11px; }',
 
+    '#ts-imp canvas.wmap { display:block; max-width:100%; height:auto;',
+    '  cursor:crosshair; touch-action:none; border:1px solid #262c36;',
+    '  border-radius:6px; background:#0d1a26; }',
+
     '#ts-imp .canvases { display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap; }',
     // Without a cap the captions below each canvas stretch their column wide
     // enough to push the output preview onto a second row.
@@ -147,6 +156,10 @@ TS.importer = (function () {
     channel: 'lum', invert: false,
     seaRaw: 0, topM: 300, offsetM: 0,
     bathy: true, shelfDepth: 60, shelfSlope: 12, flatten: true,
+    // Off by default: this is a hypothesis about why land stays puddled after the
+    // solver's face-bed fix, not something that has been shown to help on a real
+    // map yet. It also only affects NEW imports.
+    fillPits: false, maxFill: 3,
     maxDepth: 200, clampDepth: true,
     N: 1024, widthKm: 20, flipX: false, flipY: false
   };
@@ -347,8 +360,12 @@ TS.importer = (function () {
       var b = ((j + 0.5) / N - 0.5) * 2 * box.s * fy;
       for (var i = 0; i < N; i++) {
         var a = ((i + 0.5) / N - 0.5) * 2 * box.s * fx;
-        var sx = box.cx + a * ax.rx + b * ax.ux;
-        var sy = box.cy + a * ax.ry + b * ax.uy;
+        // Box coordinates are pixel EDGES; bilinear wants pixel CENTRES, which
+        // sit half a pixel in. Without the -0.5 every import is shifted half a
+        // cell and quietly 2-tap blurred even at 1:1 scale. fetch_terrain.py and
+        // main.js's own resampler both make this correction.
+        var sx = box.cx + a * ax.rx + b * ax.ux - 0.5;
+        var sy = box.cy + a * ax.ry + b * ax.uy - 0.5;
         g[j * N + i] = bilinear(scalar, w, h, sx, sy);
       }
     }
@@ -434,6 +451,37 @@ TS.importer = (function () {
     return touched;
   }
 
+  // Real elevation data is full of one- and two-cell dips that are sampling
+  // noise, not landscape. The solver treats a cell face as a wall at the higher
+  // of the two beds (which is correct), so every one of those dips traps water
+  // forever and the map ends up speckled with permanent puddles. Raise each dip
+  // to just above its lowest neighbour — capped, so genuine basins, lagoons and
+  // lakes survive untouched. The epsilon leaves a whisker of slope so the filled
+  // cell drains instead of becoming a flat pan.
+  function fillPits(elev, N, maxFill, passes) {
+    var filled = 0, EPS = 0.002;
+    for (var p = 0; p < passes; p++) {
+      var changed = 0;
+      for (var j = 1; j < N - 1; j++) {
+        for (var i = 1; i < N - 1; i++) {
+          var k = j * N + i, v = elev[k];
+          var m = elev[k - 1];
+          if (elev[k + 1] < m) m = elev[k + 1];
+          if (elev[k - N] < m) m = elev[k - N];
+          if (elev[k + N] < m) m = elev[k + N];
+          if (v < m) {
+            var t = m + EPS;
+            if (t > v + maxFill) t = v + maxFill;
+            if (t > v) { elev[k] = t; changed++; }
+          }
+        }
+      }
+      filled += changed;
+      if (!changed) break;
+    }
+    return filled;
+  }
+
   // The solver pushes the wave in through a forcing strip at row 0. If that strip
   // is dry or paper-thin the wave has nothing to push, so level it to the depth
   // just inland of it.
@@ -474,6 +522,9 @@ TS.importer = (function () {
     var k;
     for (k = 0; k < N * N; k++) elev[k] = map(raw[k]);
 
+    var pitted = 0;
+    if (cfg.fillPits) pitted = fillPits(elev, N, cfg.maxFill, 6);
+
     var synthesized = 0;
     if (cfg.bathy) synthesized = synthBathymetry(elev, N, L);
     if (cfg.clampDepth) {
@@ -507,7 +558,7 @@ TS.importer = (function () {
       stats: {
         lo: lo, hi: hi, dx: dx, waterFrac: wet / (N * N),
         entryFrac: entryWater / N, entryDepth: entryDepth,
-        maxDepth: maxDepth, dt: dt, synthesized: synthesized
+        maxDepth: maxDepth, dt: dt, synthesized: synthesized, pitted: pitted
       }
     };
   }
@@ -963,11 +1014,50 @@ TS.importer = (function () {
 
   // ------------------------------------------------------------ GMRT fetch --
 
+  // Rough seconds to download, calibrated on a real 40 km fetch at ~100 m
+  // (≈8 s). Data volume goes as (km / mresolution)², so both terms are squared.
+  function estimateSeconds(km, mres) {
+    return 8 * Math.pow(km / 40, 2) * Math.pow(100 / mres, 2);
+  }
+
+  function updateEstimate() {
+    if (!ui.gEst) return;
+    var km = parseFloat(ui.gKm.value), mres = parseInt(ui.gRes.value, 10) || 100;
+    if (!isFinite(km) || km <= 0) { ui.gEst.style.display = 'none'; return; }
+    var secs = estimateSeconds(km, mres);
+    var pretty = secs < 60 ? Math.max(2, Math.round(secs)) + ' seconds' :
+      'over a minute' + (secs > 110 ? ' — possibly two' : '');
+    var slow = km > SLOW_KM;
+    ui.gEst.className = 'msg ' + (slow ? 'warn' : 'tip');
+    ui.gEst.innerHTML = '';
+    add(ui.gEst, el('span', 'ic', slow ? '⏳' : '💡'));
+    var body = add(ui.gEst, el('span'));
+    if (km > MAX_KM) {
+      body.textContent = MAX_KM + ' km is the maximum — beyond that GMRT tends to ' +
+        'time out before it finishes. Reduce the width.';
+    } else if (slow) {
+      body.innerHTML = 'A ' + Math.round(km) + ' km area takes about <b>' + pretty +
+        '</b> to download. Switching Source detail to Medium would cut that to about ' +
+        Math.max(2, Math.round(estimateSeconds(km, 250))) + ' s, and at this size you ' +
+        'will barely see the difference unless you run at 2048 or higher.';
+    } else {
+      body.textContent = 'Roughly ' + pretty + ' to download at this size.';
+    }
+    ui.gEst.style.display = '';
+  }
+
   function fetchGmrt() {
     var lat = parseFloat(ui.gLat.value), lon = parseFloat(ui.gLon.value);
     var km = parseFloat(ui.gKm.value);
     if (!isFinite(lat) || !isFinite(lon) || !isFinite(km) || km <= 0) {
       showErr('Enter a latitude, a longitude and a width in km.');
+      return;
+    }
+    if (km > MAX_KM) {
+      ui.gKm.value = MAX_KM;
+      updateEstimate();
+      showErr(MAX_KM + ' km is the maximum — larger areas time out before GMRT ' +
+        'finishes building them. Set to ' + MAX_KM + ' km; press Fetch again to go ahead.');
       return;
     }
     // Fetch a box big enough that the square still fits after any rotation.
@@ -981,14 +1071,33 @@ TS.importer = (function () {
       '&maxlongitude=' + (lon + dLon).toFixed(5) +
       '&layer=topo&format=esriascii&mresolution=' + (ui.gRes.value || 100);
 
-    setBusy('Fetching land + seabed from GMRT — usually 5–15 seconds…', true);
+    var mres = parseInt(ui.gRes.value, 10) || 100;
+    var est = estimateSeconds(km, mres);
+    setBusy('Fetching land + seabed from GMRT — expect about ' +
+      (est < 60 ? Math.max(2, Math.round(est)) + ' seconds' : 'a minute or more') +
+      '…', true);
     ui.gBtn.disabled = true;
     ui.gBtn.textContent = 'Fetching…';
-    ui.gNote.textContent = 'Downloading elevation for a ' + km + ' km area. Bigger ' +
-      'areas and finer detail take longer — the timer at the bottom is still running, ' +
-      'so nothing is stuck.';
+    ui.gNote.textContent = 'Downloading a ' + Math.round(km) + ' km area at ~' + mres +
+      ' m detail. The counter at the bottom of the window keeps moving the whole ' +
+      'time, so you can always tell it is still working rather than stuck.';
     ui.gNote.style.display = '';
-    fetch(url, { headers: { Accept: 'text/plain' } }).then(function (r) {
+
+    // Give up eventually rather than spinning forever: three times the estimate,
+    // never less than a minute, never more than four.
+    var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var budget = Math.min(240, Math.max(60, est * 3)) * 1000;
+    var giveUp = setTimeout(function () {
+      if (ctrl) ctrl.abort();
+    }, budget);
+
+    fetch(url, {
+      headers: { Accept: 'text/plain' },
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (r) {
+      clearTimeout(giveUp);
+      return r;
+    }).then(function (r) {
       if (!r.ok) throw new Error('GMRT returned HTTP ' + r.status);
       return r.text();
     }).then(function (text) {
@@ -1015,11 +1124,19 @@ TS.importer = (function () {
       syncBoxReadouts();
       setTab('source');
     })['catch'](function (err) {
+      clearTimeout(giveUp);
       ui.gBtn.disabled = false;
       ui.gBtn.textContent = 'Fetch terrain';
       ui.gNote.style.display = 'none';
-      showErr(err.message + (/Failed to fetch/i.test(err.message) ?
-        ' — check your connection; GMRT must be reachable.' : ''));
+      var msg = err.message || String(err);
+      if (err.name === 'AbortError') {
+        msg = 'GMRT did not answer within ' + Math.round(budget / 1000) +
+          ' seconds. Try a smaller width, or a coarser Source detail — both cut the ' +
+          'download sharply, since it scales with area.';
+      } else if (/Failed to fetch/i.test(msg)) {
+        msg += ' — check your connection; GMRT must be reachable.';
+      }
+      showErr(msg);
     });
   }
 
@@ -1109,6 +1226,24 @@ TS.importer = (function () {
     checkbox(p, 'Level the wave-entry strip', cfg.flatten, function (v) {
       cfg.flatten = v; refresh(false);
     });
+
+    add(p, el('h3', null, 'Drainage'));
+    checkbox(p, 'Fill spurious pits', cfg.fillPits, function (v) {
+      cfg.fillPits = v; buildRight(); refresh(false);
+    });
+    add(p, el('div', 'hint', cfg.fillPits ?
+      'Elevation data is speckled with one- and two-cell dips that are sampling ' +
+      'noise rather than real ground. Water settles into every one of them and ' +
+      'never leaves, leaving the land covered in permanent puddles after the wave ' +
+      'recedes. This raises those dips just enough to drain. Real basins, lagoons ' +
+      'and lakes are deeper than the limit below, so they survive.' :
+      'Off: every dip in the source data is treated as a real basin, and will ' +
+      'hold water permanently.'));
+    if (cfg.fillPits) {
+      slider(p, 'Deepest pit to fill', 0.2, 12, 0.2, cfg.maxFill,
+        function (v) { return v.toFixed(1) + ' m'; },
+        function (v) { cfg.maxFill = v; refresh(false); });
+    }
     checkbox(p, 'Clamp depth (keeps the sim fast)', cfg.clampDepth, function (v) {
       cfg.clampDepth = v; buildRight(); refresh(false);
     });
@@ -1159,6 +1294,14 @@ TS.importer = (function () {
   function buildLeft() {
     var p = ui.left;
     p.innerHTML = '';
+
+    var wip = add(p, el('div', 'msg warn'));
+    wip.style.marginBottom = '13px';
+    add(wip, el('span', 'ic', '⚠'));
+    add(wip, el('span', null, 'Work in progress. Real-world maps can show odd ' +
+      'artefacts along steep coastlines — patches of water that sit on the shore ' +
+      'and never drain; this is a known issue with how shallow standing water is ' +
+      'handled. Gentle coastlines and the built-in procedural terrain are unaffected.'));
 
     var tabs = add(p, el('div', 'tabs'));
     ui.tabSource = button(tabs, 'Your file', 'on', function () { setTab('source'); });
@@ -1251,7 +1394,28 @@ TS.importer = (function () {
       '<b>GMRT synthesis</b> (Global Multi-Resolution Topography, ~100 m). No key, ' +
       'no account, no download step — and unlike an image heightmap it has <b>real ' +
       'bathymetry</b>, which is what makes run-up believable.';
-    gi.style.marginBottom = '14px';
+    gi.style.marginBottom = '12px';
+
+    // Location picker
+    if (TS.worldmap && TS.worldData) {
+      var mw = add(ui.paneGmrt, el('div', 'mapwrap'));
+      ui.mapCanvas = add(mw, el('canvas'));
+      ui.mapCanvas.width = 640; ui.mapCanvas.height = 320;
+      ui.mapCanvas.className = 'wmap';
+      var mrow = add(ui.paneGmrt, el('div', 'row'));
+      mrow.style.marginTop = '8px';
+      var mcap = add(mrow, el('div', 'hint'));
+      mcap.style.flex = '1';
+      mcap.style.marginTop = '0';
+      mcap.innerHTML = '<b style="color:#c3cad6">Click the coast</b> you want · ' +
+        'scroll to zoom · drag to pan. The teal box is the area you would fetch.';
+      button(mrow, 'Zoom to pin', 'sm', function () {
+        if (ui.wmap) ui.wmap.zoomToPin(parseFloat(ui.gKm.value) || 40);
+      });
+      button(mrow, 'Whole world', 'sm', function () {
+        if (ui.wmap) ui.wmap.reset();
+      });
+    }
 
     var r1 = add(ui.paneGmrt, el('div', 'row'));
     var latF = add(r1, el('div')); latF.style.flex = '1';
@@ -1265,7 +1429,8 @@ TS.importer = (function () {
     var kmF = add(r2, el('div')); kmF.style.flex = '1';
     add(add(kmF, el('div', 'lbl')), el('span', null, 'Width (km)'));
     ui.gKm = add(kmF, el('input')); ui.gKm.type = 'number';
-    ui.gKm.value = '40'; ui.gKm.min = '2'; ui.gKm.step = '1';
+    ui.gKm.value = '40'; ui.gKm.min = '2'; ui.gKm.max = String(MAX_KM);
+    ui.gKm.step = '1';
     var rsF = add(r2, el('div')); rsF.style.flex = '1';
     add(add(rsF, el('div', 'lbl')), el('span', null, 'Source detail'));
     ui.gRes = add(rsF, el('select'));
@@ -1275,18 +1440,46 @@ TS.importer = (function () {
         op.value = o[0];
       });
 
+    ui.gEst = add(ui.paneGmrt, el('div', 'msg tip'));
     var r3 = add(ui.paneGmrt, el('div', 'row'));
     ui.gBtn = button(r3, 'Fetch terrain', 'pri wide', fetchGmrt);
     ui.gNote = add(ui.paneGmrt, el('div', 'msg tip'));
     ui.gNote.style.display = 'none';
     var tip = add(ui.paneGmrt, el('div', 'hint'));
-    tip.innerHTML = '<b style="color:#c3cad6">This takes a few seconds</b> — usually ' +
-      '5 to 15, longer for a big area at fine detail. A timer runs at the bottom of ' +
-      'the window while it works.<br><br>' +
+    tip.innerHTML = '<b style="color:#c3cad6">Download time grows with area</b> — ' +
+      'doubling the width roughly quadruples the wait. The estimate above updates as ' +
+      'you change the width and the detail, and a counter runs at the bottom of the ' +
+      'window while it works.<br><br>' +
       'Coordinates come from any map — right-click a spot in Google Maps and it ' +
       'copies them. Defaults point at Lisbon, levelled by the 1755 tsunami.<br><br>' +
-      'Very large areas time out; if a fetch fails, try a coarser detail setting or a ' +
-      'narrower box.';
+      MAX_KM + ' km is the cap: past that GMRT usually times out before it finishes. ' +
+      'For a big stretch of coast, a coarser Source detail is far more effective than ' +
+      'patience.';
+
+    // Two-way binding: clicking the map fills the fields, editing the fields
+    // moves the pin (recentring only if it would otherwise land off-screen).
+    if (ui.mapCanvas) {
+      ui.wmap = TS.worldmap.create(ui.mapCanvas, {
+        onPick: function (lat, lon) {
+          ui.gLat.value = lat.toFixed(4);
+          ui.gLon.value = lon.toFixed(4);
+          ui.wmap.setExtentKm(parseFloat(ui.gKm.value) || 0);
+        }
+      });
+      var syncPin = function () {
+        ui.wmap.setPin(parseFloat(ui.gLat.value), parseFloat(ui.gLon.value), 'auto');
+        ui.wmap.setExtentKm(parseFloat(ui.gKm.value) || 0);
+      };
+      [ui.gLat, ui.gLon, ui.gKm].forEach(function (inp) {
+        inp.addEventListener('input', syncPin);
+      });
+      syncPin();
+    }
+    [ui.gKm, ui.gRes].forEach(function (inp) {
+      inp.addEventListener('input', updateEstimate);
+      inp.addEventListener('change', updateEstimate);
+    });
+    updateEstimate();
   }
 
   function setTab(which) {
@@ -1363,6 +1556,7 @@ TS.importer = (function () {
 
   function close() {
     stopTick();
+    if (ui.wmap) ui.wmap.dispose();
     if (root) root.remove();
     root = null;
     ui = {};

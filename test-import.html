@@ -22,6 +22,8 @@
 
 <script src="js/tsu.js"></script>
 <script src="js/decode.js"></script>
+<script src="js/worldmap-data.js"></script>
+<script src="js/worldmap.js"></script>
 <script src="js/importer.js"></script>
 <script>
 var pass = 0, fail = 0;
@@ -513,6 +515,181 @@ chain = chain.then(function () {
         }
         return 'identical after write/read';
       });
+  });
+});
+
+// ------------------------------------------------------------- world map ---
+
+var WORLD_RINGS = null;
+
+chain = chain.then(function () {
+  return check('world coastline data decodes to sane coordinates', function () {
+    WORLD_RINGS = TS.worldmap.decode(TS.worldData);
+    assert(WORLD_RINGS.length > 800, 'only ' + WORLD_RINGS.length + ' rings');
+    var verts = 0;
+    for (var i = 0; i < WORLD_RINGS.length; i++) {
+      var p = WORLD_RINGS[i].pts;
+      verts += p.length / 2;
+      for (var k = 0; k < p.length; k += 2) {
+        if (!isFinite(p[k]) || !isFinite(p[k + 1])) throw new Error('non-finite at ring ' + i);
+        if (p[k] < -180.01 || p[k] > 180.01) throw new Error('longitude out of range: ' + p[k]);
+        if (p[k + 1] < -90.01 || p[k + 1] > 90.01) throw new Error('latitude out of range: ' + p[k + 1]);
+      }
+    }
+    return WORLD_RINGS.length + ' rings, ' + verts + ' vertices, ' +
+      (TS.worldData.length / 1024).toFixed(0) + ' kB encoded';
+  });
+});
+
+chain = chain.then(function () {
+  return check('the decoded world is geographically in the right places', function () {
+    // Ray casting against every ring. If the separator or delta decoding were
+    // wrong the shapes would still draw, just in the wrong place — so test
+    // against points whose land/sea status is not in dispute.
+    function onLand(lon, lat) {
+      var inside = false;
+      for (var i = 0; i < WORLD_RINGS.length; i++) {
+        var R = WORLD_RINGS[i];
+        if (lon < R.x0 || lon > R.x1 || lat < R.y0 || lat > R.y1) continue;
+        var p = R.pts, n = p.length / 2;
+        for (var a = 0, b = n - 1; a < n; b = a++) {
+          var xa = p[a * 2], ya = p[a * 2 + 1], xb = p[b * 2], yb = p[b * 2 + 1];
+          if ((ya > lat) !== (yb > lat) &&
+              lon < (xb - xa) * (lat - ya) / (yb - ya) + xa) inside = !inside;
+        }
+      }
+      return inside;
+    }
+    var land = [[139.7, 35.7, 'Tokyo'], [2.35, 48.86, 'Paris'],
+                [-99.1, 19.4, 'Mexico City'], [133, -24, 'central Australia']];
+    var sea = [[-30, 0, 'mid-Atlantic'], [-150, 30, 'mid-Pacific'],
+               [75, -35, 'southern Indian Ocean']];
+    var bad = [];
+    land.forEach(function (p) { if (!onLand(p[0], p[1])) bad.push(p[2] + ' read as sea'); });
+    sea.forEach(function (p) { if (onLand(p[0], p[1])) bad.push(p[2] + ' read as land'); });
+    if (bad.length) throw new Error(bad.join('; '));
+    return land.length + ' land points and ' + sea.length + ' ocean points all correct';
+  });
+});
+
+chain = chain.then(function () {
+  return check('map widget reports the coordinates you click', function () {
+    var cv = document.createElement('canvas');
+    cv.width = 640; cv.height = 320;
+    document.body.appendChild(cv);
+    cv.style.position = 'absolute';
+    cv.style.left = '0'; cv.style.top = '0';
+    var got = null;
+    var m = TS.worldmap.create(cv, { onPick: function (la, lo) { got = [la, lo]; } });
+    // At the default whole-world view the centre pixel is (clon, clat).
+    var r = cv.getBoundingClientRect();
+    var id = 1;
+    function ev(type, dx, dy) {
+      cv.dispatchEvent(new PointerEvent(type, {
+        clientX: r.left + 320 + dx, clientY: r.top + 160 + dy,
+        bubbles: true, pointerId: id
+      }));
+    }
+    ev('pointerdown', 0, 0);
+    ev('pointerup', 0, 0);
+    assert(got, 'no pick fired');
+    near(got[1], 0, 0.7, 'centre longitude');
+    // A 2:1 canvas showing all 360 of longitude also shows all 180 of latitude,
+    // so the view is pinned to the equator and the centre pixel is 0,0.
+    near(got[0], 0, 0.7, 'centre latitude');
+    // A quarter of the width to the right is +90 deg of longitude.
+    got = null;
+    ev('pointerdown', 160, 0);
+    ev('pointerup', 160, 0);
+    near(got[1], 90, 1.0, 'quarter-width longitude');
+    m.dispose();
+    cv.remove();
+    return 'centre -> ' + got[1].toFixed(1) + '°, offsets map linearly';
+  });
+});
+
+chain = chain.then(function () {
+  return check('pit filling drains noise dips but spares real basins', function () {
+    // A slope speckled with one-cell dips (sampling noise) plus one genuine
+    // 9 m basin. The specks must go; the basin must survive.
+    var n = 96, g = new Float32Array(n * n);
+    for (var j = 0; j < n; j++) {
+      for (var i = 0; i < n; i++) g[j * n + i] = (j / (n - 1) - 0.35) * 120;
+    }
+    var speckles = [];
+    for (var s = 0; s < 60; s++) {
+      var i2 = 5 + (s * 7) % (n - 10), j2 = 55 + (s * 13) % 30;
+      var k = j2 * n + i2;
+      g[k] -= 1.4;                       // shallow noise dip
+      speckles.push(k);
+    }
+    for (var bj = 20; bj < 26; bj++) {   // a real 9 m basin, 6x6 cells
+      for (var bi = 60; bi < 66; bi++) g[bj * n + bi] -= 9;
+    }
+    var src = TS.decode.asciiGrid(asciiFromGrid(g, n, 0.001), 'pits.asc');
+    T.setSource(src);
+    T.cfg.bathy = 0; T.cfg.flatten = 0; T.cfg.clampDepth = 0;
+    T.cfg.fillPits = 1; T.cfg.maxFill = 3;
+    var m = T.build(n);
+
+    function pitCount(grid, N) {
+      var c = 0;
+      for (var jj = 1; jj < N - 1; jj++) {
+        for (var ii = 1; ii < N - 1; ii++) {
+          var q = jj * N + ii, v = grid[q];
+          if (v < grid[q - 1] && v < grid[q + 1] && v < grid[q - N] && v < grid[q + N]) c++;
+        }
+      }
+      return c;
+    }
+    var after = pitCount(m.data, m.N);
+    T.cfg.fillPits = 0;
+    var before = pitCount(T.build(n).data, m.N);
+    assert(before > 10, 'test terrain should start pitted, got ' + before);
+    assert(after < before / 3, 'pits only went ' + before + ' -> ' + after);
+
+    // the deep basin must still be a basin
+    T.cfg.fillPits = 1;
+    var m2 = T.build(n);
+    var lo = Infinity, rim = -Infinity, N2 = m2.N;
+    for (var y = 20; y < 26; y++) {
+      for (var x = 60; x < 66; x++) lo = Math.min(lo, m2.data[y * N2 + x]);
+    }
+    for (var x2 = 58; x2 < 68; x2++) rim = Math.max(rim, m2.data[18 * N2 + x2]);
+    assert(rim - lo > 5, 'the real basin was flattened (depth now ' +
+      (rim - lo).toFixed(1) + ' m)');
+    T.cfg.fillPits = 1;
+    return 'pits ' + before + ' -> ' + after + ', real basin still ' +
+      (rim - lo).toFixed(1) + ' m deep';
+  });
+});
+
+chain = chain.then(function () {
+  return check('fetch width is capped and warns before it gets slow', function () {
+    TS.importer.close();
+    TS.importer.open({});
+    document.querySelectorAll('#ts-imp .tabs button')[1].click();
+    var km = document.querySelectorAll('#ts-imp input[type=number]')[0];
+    assert(km.max === '120', 'width input max is ' + km.max + ', expected 120');
+
+    function estText(v) {
+      km.value = v;
+      km.dispatchEvent(new Event('input', { bubbles: true }));
+      var e = document.querySelector('#ts-imp .msg.warn, #ts-imp .msg.tip');
+      return { cls: e.className, txt: e.textContent };
+    }
+    var small = estText('40');
+    assert(/tip/.test(small.cls), '40 km should not warn');
+    assert(/8 seconds/.test(small.txt), '40 km estimate was: ' + small.txt);
+
+    var big = estText('100');
+    assert(/warn/.test(big.cls), '100 km should warn, got ' + big.cls);
+    assert(/minute|5\d seconds/.test(big.txt), '100 km estimate was: ' + big.txt);
+
+    var over = estText('200');
+    assert(/maximum/.test(over.txt), 'over-cap message was: ' + over.txt);
+    TS.importer.close();
+    return '40 km → tip, 100 km → warning, 200 km → capped';
   });
 });
 

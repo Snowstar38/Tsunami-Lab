@@ -76,8 +76,13 @@ TS.render2d = (function () {
     '    vec2 ge = vec2((sE.r + sE.a) - (sW.r + sW.a), (sN.r + sN.a) - (sS.r + sS.a)) / (2.0 * cell);',
     '    float wshade = clamp(1.0 + 3.5 * dot(ge, light), 0.55, 1.7);',
     '    wc *= wshade;',
+    // Whitecaps, damped on thin films. A centimetre-deep sheet draining a steep
+    // slope is genuinely fast, so |q|/h is large and it would otherwise render
+    // as bright as a breaking bore — making a film look like a wall of water.
+    // render3d has always damped this; 2D was missing it.
     '    float sp = length(s.gb) / max(h, 0.05);',
-    '    wc = mix(wc, vec3(0.92, 0.96, 0.97), smoothstep(3.0, 8.0, sp) * 0.6);',
+    '    float foam = smoothstep(3.0, 8.0, sp) * smoothstep(0.05, 0.35, h);',
+    '    wc = mix(wc, vec3(0.92, 0.96, 0.97), foam * 0.6);',
     '    float alpha = clamp(0.55 + h * 0.35, 0.0, 0.93);',
     '    c = mix(c, wc, alpha);',
     '  }',

@@ -177,7 +177,7 @@ void main() {
   // Whitecaps where the flow is fast (speed = |q| / h); damped on thin films so
   // centimeter-deep sheets on flooded land don't strobe white.
   float speed = length(s.gb) / max(h, 0.05);
-  float foam = smoothstep(3.0, 8.0, speed) * smoothstep(0.05, 0.35, h);
+  float foam = smoothstep(3.0, 8.0, speed) * smoothstep(0.10, 0.50, h);
   col = mix(col, vec3(0.86, 0.90, 0.92), foam * 0.75);
 
   vec3 V = normalize(u_eye - v_pos);

@@ -5,10 +5,12 @@ depth-averaged equations real tsunami models use) on a GPU grid, over procedural
 generated coastal terrain, with an orbitable 3D view, an overhead topo view, and a
 record-and-scrub replay timeline.
 
-**Run it:** Either go to https://github.com/Snowstar38/Tsunami-Lab or download the repo
-and open `index.html` in a modern desktop browser (Chrome/Edge/Firefox).
+**Run it:** open `index.html` in a modern desktop browser (Chrome/Edge/Firefox).
 No install, no server, no network. Requires WebGL2 with float render targets
 (any modern desktop GPU).
+
+**Share it:** the folder is GitHub Pages-ready as-is — push it to a repo, enable
+Pages, done.
 
 ## Using it
 
@@ -39,15 +41,29 @@ scrubbing the replay.
 
 ## Real-world terrain
 
-### Make a heightmap… (no install needed)
+### Make a heightmap… (work in progress)
+
+> **Known issue:** maps imported from real-world elevation data can show odd
+> artefacts along steep coastlines — patches of water that sit on the shore and
+> never drain, most visible near cliffs and inlets. The flooding physics is
+> sound; the problem is in how shallow standing water is handled. Gentle
+> coastlines and the procedural terrain are unaffected.
+
 
 The **Make a heightmap…** button opens an importer that turns terrain data into a
 map this sim can flood. Two ways in:
 
-- **Fetch real terrain** — type a latitude, longitude and width, and it pulls
-  merged land + seabed elevation straight from the GMRT synthesis in the browser.
-  No API key, no account, no download step. This is the best option, because it
-  comes with *real bathymetry*.
+- **Fetch real terrain** — **click a coastline on the world map**, or type a
+  latitude and longitude, and it pulls merged land + seabed elevation straight
+  from the GMRT synthesis in the browser. No API key, no account, no download
+  step. This is the best option, because it comes with *real bathymetry*.
+  Scroll to zoom into the map, drag to pan, and the teal box shows the exact
+  footprint of the width you asked for, so you can see how much coast you are
+  about to get before you fetch anything. A live estimate tells you how long the
+  download will take — it scales with **area**, so doubling the width roughly
+  quadruples the wait (≈8 s at 40 km, ≈50 s at 100 km, at finest detail). 120 km
+  is the cap; past that GMRT tends to time out. For a big stretch of coast, a
+  coarser Source detail helps far more than patience.
 - **Your file** — drop in a heightmap: PNG (8- or 16-bit), JPG, ESRI ASCII `.asc`,
   SRTM `.hgt`, raw `.raw`/`.r16`, or an existing `.tsu` you want to re-crop.
   16-bit PNGs are decoded properly (canvas would crush them to 256 height steps).
@@ -112,6 +128,9 @@ All physics runs in WebGL2 fragment shaders on RGBA32F ping-pong textures.
 Replay snapshots are downsampled on GPU, quantized to Uint16 on CPU, and
 re-interpolated on scrub. See `SPEC.md` for the architecture contract.
 
-Built by Claude (Fable 5 and Opus 5, with Opus 5 subagents), August 2026.
+World coastlines from [Natural Earth](https://www.naturalearthdata.com/) (1:50m
+land polygons, public domain).
+
+Built by Claude (Fable 5 and Opus 5, with three Opus 5 subagents), August 2026.
 Phase 2 (planned): trees, buildings, seawalls + fragility damage, erosion &
 sediment transport, debris, before/after slider.

@@ -40,7 +40,14 @@ tsunami-sim/
   js/tsu.js       .tsu container: reads TSU1 + TSU2, writes TSU2 (async: it compresses)
   js/decode.js    file -> raw sample grid (PNG 8/16-bit, JPG, .asc, .hgt, .raw, .tsu)
   js/importer.js  the "Make a heightmap" dialog: crop, orient, scale, seabed, export
+  js/worldmap-data.js  world coastlines, ~95 kB (Natural Earth 1:50m, public domain)
+  js/worldmap.js       equirectangular click-to-pick map widget
 ```
+
+The coastline blob is delta + zigzag varint ASCII (the Google polyline scheme),
+rings separated by **newlines** — `~` cannot be the separator because byte 126 occurs
+inside the encoding's own 63..126 range. Equirectangular projection is deliberate:
+lon→x and lat→y are linear, so click-to-coordinate is exact.
 
 The importer modules touch no WebGL and do nothing at load time — `TS.importer.open()`
 is the only entry point, so they cost the sim loop nothing. `main.js` hands the result

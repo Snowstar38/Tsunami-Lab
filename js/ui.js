@@ -209,7 +209,8 @@ TS.ui = (function () {
   var CALLBACK_NAMES = ['onRegenerate', 'onResolutionChange', 'onWaveChange',
     'onManningChange', 'onStart', 'onPause', 'onReset', 'onViewMode', 'onExaggeration',
     'onOverlayMaxExtent', 'onScrub', 'onLive', 'onReplayPlay', 'onReplayPause', 'onTurbo',
-    'onLoadTerrain', 'onOpenImporter', 'onRotateView', 'onResetView', 'onOutlineChange',
+    'onLoadTerrain', 'onOpenImporter', 'onSaveMap', 'onRotateView', 'onResetView',
+    'onOutlineChange',
     'onPresetSelect', 'onPresetSave', 'onPresetDelete', 'onPresetExport'];
 
   // --- state -----------------------------------------------------------------
@@ -312,7 +313,10 @@ TS.ui = (function () {
       file.value = '';
     });
     var makeRow = add(g, el('div', 'ts-row'));
-    button(makeRow, '🗺 Make a heightmap…', 'wide', function () { cb.onOpenImporter(); });
+    button(makeRow, '🗺 Make a heightmap… (buggy)', 'wide',
+      function () { cb.onOpenImporter(); });
+    var saveRow = add(g, el('div', 'ts-row'));
+    button(saveRow, '💾 Save current map…', 'wide', function () { cb.onSaveMap(); });
     add(g, el('div', 'ts-hint', 'Import your own terrain, or fetch real land + ' +
       'seabed by coordinates.'));
     ctl.mapname = add(g, el('div', 'ts-hint', ''));

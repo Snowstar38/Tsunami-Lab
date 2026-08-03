@@ -66,6 +66,15 @@ TS.solver = (function () {
     '  vec3 Up = qR.xyz - 0.5 * slope3(qL.xyz, qR.xyz, qRR.xyz);',
     '  float hm = (qL.w < RECON_DRY) ? max(qL.w, 0.0) : max(Um.x - Bf, 0.0);',
     '  float hp = (qR.w < RECON_DRY) ? max(qR.w, 0.0) : max(Up.x - Bf, 0.0);',
+    // Floor the reconstruction with the plain (first-order) face depth. On land
+    // beside dry cells the limited w-slope follows the TERRAIN downhill, so the
+    // reconstructed surface at the lower face can fall below the face bed and
+    // the cell reports zero depth there — it stops draining and holds its water
+    // forever. Falling back to "how much water actually stands above this face,
+    // capped by what the cell holds" restores drainage. At rest both expressions
+    // are identical, so the well-balanced lake property is untouched.
+    '  hm = max(hm, min(qL.w, qL.x - Bf));',
+    '  hp = max(hp, min(qR.w, qR.x - Bf));',
     '  if (hm < H_DRY && hp < H_DRY) return vec3(0.0);',   // no flux between dry faces
     '  float um = dvel(hm, Um.y), tm = dvel(hm, Um.z);',
     '  float up = dvel(hp, Up.y), tp = dvel(hp, Up.z);',
@@ -127,8 +136,19 @@ TS.solver = (function () {
     '  vec4 qN_y  = vec4(Nc.r + Nc.a, Nc.b, Nc.g, Nc.r);',
     '  vec4 qNN_y = vec4(NN.r + NN.a, NN.b, NN.g, NN.r);',
 
-    '  float BfE = 0.5 * (C.a + E.a),  BfW = 0.5 * (W.a + C.a);',
-    '  float BfN = 0.5 * (C.a + Nc.a), BfS = 0.5 * (Sc.a + C.a);',
+    // Face bed = the HIGHER of the two cells (Audusse hydrostatic reconstruction),
+    // not their average. With an average, a face between a 0 m valley and a 10 m
+    // ridge sits at 5 m, so 6 m of water in the valley pours straight THROUGH the
+    // ridge and onto its crest — then runs down the far side forever, because the
+    // sea keeps refilling the valley. Harmless where neighbours differ by
+    // centimetres (procedural terrain, Cape Cod); catastrophic on real mountains
+    // where they differ by tens of metres.
+    //
+    // Well-balancedness is preserved: at rest w = const, both sides reconstruct to
+    // max(-Bf, 0) whatever Bf is, and the source term below uses these SAME face
+    // values, so the flux and source still cancel exactly. See test-solver.html.
+    '  float BfE = max(C.a, E.a),  BfW = max(W.a, C.a);',
+    '  float BfN = max(C.a, Nc.a), BfS = max(Sc.a, C.a);',
 
     '  vec3 FE = cuFlux(qW_x,  qC_x, qE_x,  qEE_x, BfE);',
     '  vec3 FW = cuFlux(qWW_x, qW_x, qC_x,  qE_x,  BfW);',
@@ -154,6 +174,12 @@ TS.solver = (function () {
     '    hWx = max(qC_x.x - 0.5 * sx.x - BfW, 0.0);',
     '    hNy = max(qC_y.x + 0.5 * sy.x - BfN, 0.0);',
     '    hSy = max(qC_y.x - 0.5 * sy.x - BfS, 0.0);',
+    // Same floor as cuFlux, so the bed-slope source keeps using the identical
+    // face depths the fluxes did.
+    '    hEx = max(hEx, min(C.r, qC_x.x - BfE));',
+    '    hWx = max(hWx, min(C.r, qC_x.x - BfW));',
+    '    hNy = max(hNy, min(C.r, qC_y.x - BfN));',
+    '    hSy = max(hSy, min(C.r, qC_y.x - BfS));',
     '  }',
     '  float Sx = -G * 0.5 * (hEx + hWx) * (BfE - BfW) / u_dx;',
     '  float Sy = -G * 0.5 * (hNy + hSy) * (BfN - BfS) / u_dx;',

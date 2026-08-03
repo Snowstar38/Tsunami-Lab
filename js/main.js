@@ -6,6 +6,7 @@ TS.main = (function () {
   var PROC_L = 10240;            // procedural domain size, meters
   var L = PROC_L;                // current domain size (real maps set their own)
   var loadedMap = null;          // { name, N, L, data } when a .tsu heightmap is active
+  var lastTerrain = null;        // the grid actually handed to the solver
 
   var settings = {
     seed: 470237, coastComplexity: 0.55, hilliness: 0.5,
@@ -155,6 +156,7 @@ TS.main = (function () {
         });
         console.log('terrain: ' + settings.N + '^2 in ' + ((performance.now() - t0) | 0) + ' ms');
       }
+      lastTerrain = data;
       done(data);
     }, 30);
   }
@@ -401,6 +403,42 @@ TS.main = (function () {
         };
         rd.onerror = function () { TS.ui.showError('Could not read file.'); };
         rd.readAsArrayBuffer(file);
+      },
+      // Export whatever terrain is loaded right now — including a map that came
+      // from the importer and was never saved, and procedural terrain, so a run
+      // you like can always be handed to someone else.
+      onSaveMap: function () {
+        if (!lastTerrain) { TS.ui.showError('No terrain to save yet.'); return; }
+        var name = loadedMap ? loadedMap.name.replace(/\.tsu2?$/i, '') :
+          'procedural-' + settings.seed + '-c' + settings.coastComplexity +
+          '-h' + settings.hilliness;
+        // Prefer the map as it was imported: running at 512 must not save a
+        // downsampled copy of a 1024 map.
+        var src = loadedMap || { N: settings.N, L: L, data: lastTerrain };
+        var map = {
+          N: src.N, L: src.L, data: src.data, name: name,
+          source: loadedMap ? (loadedMap.meta && loadedMap.meta.source) || 'imported'
+                            : 'Tsunami Lab procedural terrain',
+          widthKm: +(src.L / 1000).toFixed(3), cellSizeM: +(src.L / src.N).toFixed(2)
+        };
+        if (loadedMap && loadedMap.meta) {
+          if (loadedMap.meta.lat != null) map.lat = loadedMap.meta.lat;
+          if (loadedMap.meta.lon != null) map.lon = loadedMap.meta.lon;
+        } else if (loadedMap) {
+          if (loadedMap.lat != null) map.lat = loadedMap.lat;
+          if (loadedMap.lon != null) map.lon = loadedMap.lon;
+        }
+        TS.tsu.write(map, {}).then(function (blob) {
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = name.replace(/[^\w.\- ]+/g, '_') + '.tsu';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function () { URL.revokeObjectURL(a.href); }, 20000);
+        })['catch'](function (e) {
+          TS.ui.showError('Could not save the map: ' + e.message);
+        });
       },
       onOpenImporter: function () {
         if (!TS.importer) { TS.ui.showError('The heightmap importer failed to load.'); return; }

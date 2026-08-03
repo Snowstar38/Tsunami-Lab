@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>solver test</title>
+<style>
+  body { margin: 0; background: #111; }
+  #view { width: 768px; height: 768px; display: block; }
+  #hud { position: fixed; left: 8px; top: 8px; color: #0f0; font: 13px monospace;
+         background: rgba(0,0,0,.6); padding: 6px 8px; white-space: pre; }
+</style>
+</head>
+<body>
+<canvas id="view" width="768" height="768"></canvas>
+<div id="hud">booting…</div>
+<script src="js/gl.js"></script>
+<script src="js/terrain.js"></script>
+<script src="js/solver.js"></script>
+<script src="js/render2d.js"></script>
+<script>
+(function () {
+  'use strict';
+  var N = 256, L = 10240, dx = L / N;
+  var hud = document.getElementById('hud');
+  function say(s) { hud.textContent = s; }
+  window.onerror = function (msg, src, line) {
+    say('JSERROR: ' + msg + '\n' + (src || '') + ':' + line);
+    document.title = 'FAIL-js';
+    return false;
+  };
+
+  var canvas = document.getElementById('view');
+  var gl = TS.gl.getContext(canvas);
+  if (!gl) { say('FAIL: no WebGL2/float'); document.title = 'FAIL-nogl'; return; }
+
+  // Default: analytic test terrain. With #gen in the URL, use the real generator
+  // at the steepest corner (coastComplexity=1, hilliness=1) for stability soaks.
+  var terr;
+  if (location.hash.indexOf('gen') >= 0) {
+    terr = TS.terrain.generate({
+      N: N, seed: 42, coastComplexity: 1, hilliness: 1,
+      barrierIslands: true, riverValley: true
+    });
+  } else {
+    terr = new Float32Array(N * N);
+    for (var j = 0; j < N; j++) {
+      for (var i = 0; i < N; i++) {
+        var x = i / (N - 1), y = j / (N - 1);
+        var B = -60 + 100 * y;                                   // coast at y = 0.6
+        B += 18 * Math.exp(-(Math.pow(x - 0.5, 2) + Math.pow(y - 0.55, 2)) / 0.004); // headland
+        B += 12 * Math.exp(-(Math.pow(x - 0.25, 2) + Math.pow(y - 0.35, 2)) / 0.0012); // island
+        terr[j * N + i] = B;
+      }
+    }
+  }
+
+  TS.solver.init(gl, { N: N, dx: dx, terrain: terr });
+  TS.solver.setParams({ manning: 0.03, waveAmplitude: 8, wavePeriod: 180, waveform: 'pulse' });
+
+  // volume/max readback via a scratch FBO on the live state texture
+  var buf = new Float32Array(N * N * 4);
+  function stats() {
+    var fbo = TS.gl.createFBO(gl, TS.solver.stateTexture);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.readPixels(0, 0, N, N, gl.RGBA, gl.FLOAT, buf);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fbo);
+    var vol = 0, maxh = 0, maxsp = 0, nan = 0, wetLand = 0, edgeWet = 0, wetJmax = -1, wetJmaxH = 0;
+    for (var k = 0; k < N * N; k++) {
+      var h = buf[k * 4], hu = buf[k * 4 + 1], hv = buf[k * 4 + 2], B = buf[k * 4 + 3];
+      if (h !== h) { nan++; continue; }
+      vol += h;
+      if (h > maxh) maxh = h;
+      if (h > 0.05) {
+        var sp = Math.hypot(hu, hv) / Math.max(h, 0.05);
+        if (sp > maxsp) maxsp = sp;
+        if (B > 0.5) {
+          wetLand++;
+          var jj = (k / N) | 0, ii = k % N;
+          if (jj === 0 || jj === N - 1 || ii === 0 || ii === N - 1) edgeWet++;
+          if (jj > wetJmax) { wetJmax = jj; wetJmaxH = h; }
+        }
+      }
+    }
+    return { vol: vol * dx * dx / 1e9, maxh: maxh, maxsp: maxsp, nan: nan, wetLand: wetLand, edgeWet: edgeWet, wetJmax: wetJmax, wetJmaxH: wetJmaxH };
+  }
+
+  var frames = 0;
+  function loop() {
+    var r = TS.solver.stepBatch(250);
+    frames++;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    TS.render2d.draw(gl, {
+      stateTex: TS.solver.stateTexture, maxTex: TS.solver.maxTexture, showMax: true,
+      width: canvas.width, height: canvas.height, dx: dx, L: L
+    });
+    if (frames < 3 || frames % 10 === 0 || r.unstable || r.simTime > 900) {
+      var s = stats();
+      say('t=' + r.simTime.toFixed(1) + 's  dt=' + r.dt.toFixed(3) +
+          '\nvol=' + s.vol.toFixed(4) + ' km3  maxh=' + s.maxh.toFixed(2) + ' m' +
+          '\nmaxspeed=' + s.maxsp.toFixed(1) + ' m/s  wetLandCells=' + s.wetLand + ' (edge ' + s.edgeWet + ')' +
+          '\nnorthmost wet land: j=' + s.wetJmax + ' h=' + s.wetJmaxH.toFixed(3) +
+          '\nNaN=' + s.nan + (r.unstable ? '\nUNSTABLE' : ''));
+      if (r.unstable || s.nan > 0) { document.title = 'FAIL-unstable'; return; }
+    }
+    if (r.simTime > 900) { document.title = 'DONE'; return; }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

@@ -15,6 +15,8 @@ TS.render2d = (function () {
     'uniform float u_L;         // domain size, m',
     'uniform int u_rot;         // view rotation, quarter turns CCW (0..3)',
     'uniform int u_outline;     // draw the original sea-level coastline contour',
+    'uniform float u_zoom;      // 1 = whole domain',
+    'uniform vec2 u_pan;        // view centre offset, domain-normalized',
     'in vec2 v_uv;',
     'out vec4 o;',
 
@@ -35,6 +37,9 @@ TS.render2d = (function () {
     'void main() {',
     '  float side = min(u_canvas.x, u_canvas.y);',
     '  vec2 uv = (gl_FragCoord.xy - 0.5 * (u_canvas - vec2(side))) / side;',
+    // Pan/zoom live in SCREEN space, before the quarter-turn remap, so a drag
+    // always moves the map the way the mouse went whatever the view rotation is.
+    '  uv = (uv - 0.5) / u_zoom + 0.5 + u_pan;',
     '  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {',
     '    o = vec4(0.078, 0.09, 0.11, 1.0); return;',
     '  }',
@@ -120,6 +125,8 @@ TS.render2d = (function () {
       g2.uniform1f(u.u_L, opts.L);
       g2.uniform1i(u.u_rot, opts.rot || 0);
       g2.uniform1i(u.u_outline, opts.outline ? 1 : 0);
+      g2.uniform1f(u.u_zoom, opts.zoom || 1);
+      g2.uniform2f(u.u_pan, opts.panX || 0, opts.panY || 0);
     });
   }
 

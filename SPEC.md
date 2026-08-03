@@ -35,7 +35,17 @@ tsunami-sim/
   js/render3d.js  (agent B) 3D heightfield terrain + water surface rendering
   js/replay.js    (agent C) snapshot recording, quantized storage, interpolated playback
   js/ui.js        (agent C) control sidebar + timeline DOM (no GL calls in ui.js)
+
+  added after phase 1 — the heightmap importer, self-contained and GL-free:
+  js/tsu.js       .tsu container: reads TSU1 + TSU2, writes TSU2 (async: it compresses)
+  js/decode.js    file -> raw sample grid (PNG 8/16-bit, JPG, .asc, .hgt, .raw, .tsu)
+  js/importer.js  the "Make a heightmap" dialog: crop, orient, scale, seabed, export
 ```
+
+The importer modules touch no WebGL and do nothing at load time — `TS.importer.open()`
+is the only entry point, so they cost the sim loop nothing. `main.js` hands the result
+to `useMap()`, which is also what the "Load heightmap…" file button calls.
+`test-import.html` is a standalone harness for them (like `test-solver.html`).
 
 Agents: write ONLY your assigned files. The lead integrates.
 

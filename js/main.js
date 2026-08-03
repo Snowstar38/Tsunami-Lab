@@ -23,6 +23,82 @@ TS.main = (function () {
   var lastCaptureT = -1e9, statusAt = 0, lastFrameAt = 0;
   var stepsAccum = 0, stepsAccumAt = 0, measuredSps = 0;
 
+  // 2D topo view transform. Kept here rather than in camera.js, which owns the
+  // 3D orbit only; both are driven from the same canvas.
+  var view2d = { zoom: 1, x: 0, y: 0 };
+
+  function resetView2d() { view2d.zoom = 1; view2d.x = 0; view2d.y = 0; }
+
+  function bindView2d() {
+    var drag = null;
+    var PAN_LIMIT = 0.5;     // the view centre can travel to the domain edge
+
+    function sideCss() { return Math.min(canvas.clientWidth, canvas.clientHeight); }
+    function clampPan() {
+      view2d.x = Math.max(-PAN_LIMIT, Math.min(PAN_LIMIT, view2d.x));
+      view2d.y = Math.max(-PAN_LIMIT, Math.min(PAN_LIMIT, view2d.y));
+    }
+    // Letterbox-normalized cursor position, y up to match gl_FragCoord.
+    function cursor(e) {
+      var r = canvas.getBoundingClientRect();
+      var s = sideCss();
+      return {
+        x: (e.clientX - r.left - (r.width - s) / 2) / s,
+        y: 1 - (e.clientY - r.top - (r.height - s) / 2) / s
+      };
+    }
+    function on2d(e) { return settings.viewMode === '2d' && e.target === canvas; }
+
+    // Capture phase on window fires before camera.js's own canvas listeners, so
+    // panning the topo map doesn't secretly spin the 3D orbit at the same time.
+    window.addEventListener('pointerdown', function (e) {
+      if (!on2d(e)) return;
+      drag = { x: e.clientX, y: e.clientY, px: view2d.x, py: view2d.y };
+      canvas.style.cursor = 'grabbing';
+      e.stopPropagation();
+    }, true);
+
+    window.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      if (settings.viewMode !== '2d') { drag = null; return; }
+      var s = sideCss() * view2d.zoom;
+      view2d.x = drag.px - (e.clientX - drag.x) / s;
+      view2d.y = drag.py + (e.clientY - drag.y) / s;
+      clampPan();
+      e.stopPropagation();
+    }, true);
+
+    function endDrag(e) {
+      if (!drag) return;
+      drag = null;
+      canvas.style.cursor = '';
+      e.stopPropagation();
+    }
+    window.addEventListener('pointerup', endDrag, true);
+    window.addEventListener('pointercancel', endDrag, true);
+
+    window.addEventListener('wheel', function (e) {
+      if (!on2d(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var c = cursor(e);
+      var z0 = view2d.zoom;
+      var z1 = Math.max(1, Math.min(40, z0 * (e.deltaY > 0 ? 1 / 1.12 : 1.12)));
+      if (z1 === z0) return;
+      // Hold the point under the cursor still while the scale changes.
+      view2d.x += (c.x - 0.5) * (1 / z0 - 1 / z1);
+      view2d.y += (c.y - 0.5) * (1 / z0 - 1 / z1);
+      view2d.zoom = z1;
+      if (z1 === 1) { view2d.x = 0; view2d.y = 0; } else clampPan();
+    }, { capture: true, passive: false });
+
+    window.addEventListener('dblclick', function (e) {
+      if (!on2d(e)) return;
+      resetView2d();
+      e.stopPropagation();
+    }, true);
+  }
+
   function dx() { return L / settings.N; }
 
   function fatal(msg) {
@@ -50,18 +126,12 @@ TS.main = (function () {
     return out;
   }
 
-  function parseTsu(buf, name) {
-    var dv = new DataView(buf);
-    if (buf.byteLength < 12 || dv.getUint32(0, false) !== 0x54535531) { // 'TSU1'
-      throw new Error('Not a .tsu heightmap file');
-    }
-    var n = dv.getUint32(4, true), len = dv.getFloat32(8, true);
-    if (buf.byteLength !== 12 + n * n * 4) throw new Error('.tsu size mismatch');
-    var data = new Float32Array(buf, 12, n * n);
-    for (var k = 0; k < data.length; k++) {
-      if (!isFinite(data[k])) throw new Error('.tsu contains non-finite values');
-    }
-    return { name: name, N: n, L: len, data: data };
+  // Adopt a heightmap — from a .tsu file or straight out of the importer.
+  function useMap(map) {
+    loadedMap = map;
+    resetView2d();
+    TS.ui.setLoadedMap(map.name, map.L / 1000);
+    rebuildAll();
   }
 
   function regenTerrain(done) {
@@ -239,6 +309,7 @@ TS.main = (function () {
             stateTex: stateTex, maxTex: TS.solver.maxTexture,
             showMax: settings.overlayMax, rot: settings.viewRot,
             outline: settings.outline,
+            zoom: view2d.zoom, panX: view2d.x, panY: view2d.y,
             width: canvas.width, height: canvas.height, dx: dx(), L: L
           });
         } else {
@@ -280,8 +351,7 @@ TS.main = (function () {
       xhr.open('GET', mLoad[1]);
       xhr.responseType = 'arraybuffer';
       xhr.onload = function () {
-        try { loadedMap = parseTsu(xhr.response, mLoad[1]); } catch (e) {}
-        if (loadedMap) { TS.ui.setLoadedMap(loadedMap.name, loadedMap.L / 1000); rebuildAll(); }
+        TS.tsu.read(xhr.response, mLoad[1]).then(useMap)['catch'](function () {});
       };
       xhr.send();
     }
@@ -289,8 +359,8 @@ TS.main = (function () {
       fatal('JS error: ' + msg + ' @ ' + (src || '').split('/').pop() + ':' + line);
       return false;
     };
-    var missing = ['gl', 'terrain', 'solver', 'render2d', 'camera', 'render3d', 'replay', 'ui']
-      .filter(function (m) { return !TS[m]; });
+    var missing = ['gl', 'tsu', 'terrain', 'solver', 'render2d', 'camera', 'render3d',
+      'replay', 'ui'].filter(function (m) { return !TS[m]; });
     if (missing.length) { fatal('Missing modules: ' + missing.join(', ')); return; }
 
     gl = TS.gl.getContext(canvas);
@@ -302,6 +372,7 @@ TS.main = (function () {
 
     cam = TS.camera.create(canvas, { L: L });
     TS.ui.init(makeCallbacks(), settings);
+    bindView2d();
     refreshPresets();
     rebuildAll();
     lastFrameAt = performance.now();
@@ -324,17 +395,18 @@ TS.main = (function () {
       onLoadTerrain: function (file) {
         var rd = new FileReader();
         rd.onload = function () {
-          try {
-            loadedMap = parseTsu(rd.result, file.name);
-          } catch (e) {
+          TS.tsu.read(rd.result, file.name).then(useMap)['catch'](function (e) {
             TS.ui.showError('Could not load heightmap: ' + e.message);
-            return;
-          }
-          TS.ui.setLoadedMap(loadedMap.name, loadedMap.L / 1000);
-          rebuildAll();
+          });
         };
         rd.onerror = function () { TS.ui.showError('Could not read file.'); };
         rd.readAsArrayBuffer(file);
+      },
+      onOpenImporter: function () {
+        if (!TS.importer) { TS.ui.showError('The heightmap importer failed to load.'); return; }
+        running = false;
+        pushStatus();          // otherwise the sidebar still claims "Running"
+        TS.importer.open({ onUse: useMap });
       },
       onResolutionChange: function (n) { settings.N = n; rebuildAll(); },
       onWaveChange: function (w) {
@@ -353,6 +425,10 @@ TS.main = (function () {
       onViewMode: function (m) { settings.viewMode = m; },
       onRotateView: function () {
         settings.viewRot = (settings.viewRot + 1) % 4;
+        if (settings.viewMode !== '2d') { settings.viewMode = '2d'; }
+      },
+      onResetView: function () {
+        resetView2d();
         if (settings.viewMode !== '2d') { settings.viewMode = '2d'; }
       },
       onOutlineChange: function (b) { settings.outline = b; },

@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tsunami Lab — heightmap importer tests</title>
+<style>
+  body { background:#14171c; color:#dfe3ea; font:13px/1.5 ui-monospace,Consolas,monospace;
+         margin:0; padding:18px 22px; }
+  h1 { font-size:15px; color:#3ad6c8; margin:0 0 14px; }
+  .t { padding:3px 0; }
+  .ok::before { content:'PASS  '; color:#5fd39a; }
+  .no::before { content:'FAIL  '; color:#e5544b; }
+  .no { color:#f0a9a3; }
+  .note { color:#8b95a6; padding-left:6em; }
+  #sum { margin-top:14px; padding-top:10px; border-top:1px solid #2b323d; font-size:14px; }
+</style>
+</head>
+<body>
+<h1>heightmap importer — self test</h1>
+<div id="out"></div>
+<div id="sum">running…</div>
+
+<script src="js/tsu.js"></script>
+<script src="js/decode.js"></script>
+<script src="js/importer.js"></script>
+<script>
+var pass = 0, fail = 0;
+function log(ok, name, note) {
+  var d = document.createElement('div');
+  d.className = 't ' + (ok ? 'ok' : 'no');
+  d.textContent = name;
+  document.getElementById('out').appendChild(d);
+  if (note) {
+    var n = document.createElement('div');
+    n.className = 'note';
+    n.textContent = note;
+    document.getElementById('out').appendChild(n);
+  }
+  ok ? pass++ : fail++;
+}
+function check(name, fn) {
+  return Promise.resolve().then(fn).then(function (note) {
+    log(true, name, note);
+  })['catch'](function (e) {
+    log(false, name, e && e.message ? e.message : String(e));
+  });
+}
+function assert(c, msg) { if (!c) throw new Error(msg || 'assertion failed'); }
+function near(a, b, tol, msg) {
+  if (Math.abs(a - b) > tol) throw new Error((msg || 'value') + ': ' + a + ' vs ' + b);
+}
+
+// A synthetic coast: deep water at the south, a beach, hills to the north,
+// plus an inland lake that bathymetry synthesis must NOT touch.
+function synthGrid(n) {
+  var g = new Float32Array(n * n);
+  for (var j = 0; j < n; j++) {
+    for (var i = 0; i < n; i++) {
+      var fy = j / (n - 1);
+      var v = (fy - 0.4) * 150;                        // -60 m .. +90 m
+      v += Math.sin(i / n * 7) * 8 * Math.max(0, fy - 0.3);
+      if (fy > 0.72 && fy < 0.84 && i > n * 0.3 && i < n * 0.5) v = -12;  // lake
+      g[j * n + i] = v;
+    }
+  }
+  return g;
+}
+
+function asciiFromGrid(g, n, cell) {
+  var s = 'ncols ' + n + '\nnrows ' + n + '\nxllcorner -70.5\nyllcorner 41.5\n' +
+          'cellsize ' + cell + '\nNODATA_value -9999\n';
+  var rows = [];
+  for (var j = 0; j < n; j++) {
+    var r = [];
+    for (var i = 0; i < n; i++) r.push(g[(n - 1 - j) * n + i].toFixed(2));  // north first
+    rows.push(r.join(' '));
+  }
+  return s + rows.join('\n') + '\n';
+}
+
+var T = TS.importer._test;
+
+var chain = Promise.resolve();
+
+// ---------------------------------------------------------------- tsu ------
+
+chain = chain.then(function () {
+  return check('TSU1 legacy file still reads', function () {
+    var n = 8, L = 10240;
+    var buf = new ArrayBuffer(12 + n * n * 4);
+    var dv = new DataView(buf);
+    dv.setUint32(0, 0x54535531, false);
+    dv.setUint32(4, n, true);
+    dv.setFloat32(8, L, true);
+    var f = new Float32Array(buf, 12);
+    for (var k = 0; k < n * n; k++) f[k] = k - 20;
+    return TS.tsu.read(buf, 'legacy.tsu').then(function (m) {
+      assert(m.N === n, 'N');
+      near(m.L, L, 1e-3, 'L');
+      assert(m.data[5] === -15, 'payload');
+      return 'N=' + m.N + ' L=' + m.L;
+    });
+  });
+});
+
+chain = chain.then(function () {
+  return check('TSU2 write -> read round-trips exactly (compressed)', function () {
+    var n = 64;
+    var g = synthGrid(n);
+    return TS.tsu.write({ N: n, L: 20480, data: g, name: 'rt', lat: 41.7, lon: -70.1 })
+      .then(function (blob) {
+        assert(TS.tsu.canCompress() ? blob.size < n * n * 4 : true,
+          'compressed size should be smaller (' + blob.size + ')');
+        return blob.arrayBuffer().then(function (ab) {
+          return TS.tsu.read(ab, 'rt.tsu').then(function (m) {
+            assert(m.N === n, 'N');
+            near(m.L, 20480, 1e-3, 'L');
+            assert(m.meta.lat === 41.7, 'metadata survived');
+            for (var k = 0; k < n * n; k++) {
+              if (m.data[k] !== g[k]) throw new Error('payload differs at ' + k);
+            }
+            return 'exact, ' + (n * n * 4) + ' B -> ' + blob.size + ' B (' +
+              (100 * blob.size / (n * n * 4)).toFixed(0) + '%)';
+          });
+        });
+      });
+  });
+});
+
+chain = chain.then(function () {
+  return check('TSU2 uncompressed path round-trips', function () {
+    var n = 16, g = synthGrid(n);
+    return TS.tsu.write({ N: n, L: 1000, data: g }, { compress: false })
+      .then(function (b) { return b.arrayBuffer(); })
+      .then(function (ab) { return TS.tsu.read(ab, 'u.tsu'); })
+      .then(function (m) {
+        for (var k = 0; k < n * n; k++) if (m.data[k] !== g[k]) throw new Error('differs');
+        return 'ok';
+      });
+  });
+});
+
+chain = chain.then(function () {
+  return check('corrupt file is rejected cleanly', function () {
+    var bad = new ArrayBuffer(64);
+    return TS.tsu.read(bad, 'bad.tsu').then(function () {
+      throw new Error('should have thrown');
+    }, function (e) { return 'threw: ' + e.message; });
+  });
+});
+
+// ------------------------------------------------------------- decoders ----
+
+chain = chain.then(function () {
+  return check('ESRI ASCII grid decodes with georeferencing', function () {
+    var n = 48, g = synthGrid(n);
+    var txt = asciiFromGrid(g, n, 0.001);
+    var s = TS.decode.asciiGrid(txt, 'test.asc');
+    assert(s.w === n && s.h === n, 'dims');
+    assert(s.units === 'm', 'units');
+    assert(s.georef, 'georef missing');
+    // 0.001 deg of longitude at 41.5N is ~83 m
+    near(s.georef.mPerPxX, 83, 4, 'm/px east');
+    near(s.georef.mPerPxY, 111, 3, 'm/px north');
+    // row 0 of the decoded grid is NORTH = the hills
+    near(s.data[0], g[(n - 1) * n], 0.02, 'north row');
+    return s.note;
+  });
+});
+
+chain = chain.then(function () {
+  return check('ASCII grid honours NODATA', function () {
+    var txt = 'ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 30\n' +
+              'NODATA_value -9999\n5 -9999\n-9999 7\n';
+    var s = TS.decode.asciiGrid(txt, 'nd.asc');
+    var scalarSeen = [s.data[0], s.data[1], s.data[2], s.data[3]];
+    // nodata replacement happens in the importer's scalar build, so raw stays
+    assert(s.nodata === -9999, 'nodata not captured');
+    return 'nodata=' + s.nodata + ' raw=' + scalarSeen.join(',');
+  });
+});
+
+chain = chain.then(function () {
+  return check('raw 16-bit grid infers its own shape', function () {
+    var n = 32;
+    var u = new Uint16Array(n * n);
+    for (var k = 0; k < n * n; k++) u[k] = k % 65536;
+    var s = TS.decode.raw(u.buffer, 'terrain.r16');
+    assert(s.w === n && s.h === n, 'inferred ' + s.w + 'x' + s.h);
+    assert(s.maxValue === 65535, 'maxValue');
+    assert(s.data[7] === 7, 'values');
+    return s.note;
+  });
+});
+
+chain = chain.then(function () {
+  return check('8-bit PNG decodes through the manual parser', function () {
+    var n = 64;
+    var cv = document.createElement('canvas');
+    cv.width = n; cv.height = n;
+    var cx = cv.getContext('2d');
+    var img = cx.createImageData(n, n);
+    for (var j = 0; j < n; j++) {
+      for (var i = 0; i < n; i++) {
+        var v = Math.round(255 * j / (n - 1));
+        var p = (j * n + i) * 4;
+        img.data[p] = img.data[p + 1] = img.data[p + 2] = v;
+        img.data[p + 3] = 255;
+      }
+    }
+    cx.putImageData(img, 0, 0);
+    return new Promise(function (res) { cv.toBlob(res, 'image/png'); })
+      .then(function (blob) { return blob.arrayBuffer(); })
+      .then(function (ab) { return TS.decode.png(ab, 'ramp.png'); })
+      .then(function (s) {
+        assert(s.w === n && s.h === n, 'dims');
+        assert(s.units === 'raw', 'units should be raw');
+        var top = s.data[0], bot = s.data[(n - 1) * n * s.channels];
+        near(top, 0, 1, 'top row');
+        near(bot, 255, 1, 'bottom row');
+        return s.note + ', channels=' + s.channels;
+      });
+  });
+});
+
+chain = chain.then(function () {
+  return check('16-bit PNG keeps full precision', function () {
+    // Hand-build a 16-bit greyscale PNG: only DecompressionStream can read it
+    // back, and canvas would have crushed it to 8 bits.
+    var n = 16;
+    var stride = n * 2;
+    var raw = new Uint8Array(n * (stride + 1));
+    for (var j = 0; j < n; j++) {
+      raw[j * (stride + 1)] = 0;                     // filter: none
+      for (var i = 0; i < n; i++) {
+        var v = j * 4096 + i;                        // needs >8 bits to survive
+        raw[j * (stride + 1) + 1 + i * 2] = v >> 8;
+        raw[j * (stride + 1) + 1 + i * 2 + 1] = v & 255;
+      }
+    }
+    var cs = new CompressionStream('deflate');
+    var w = cs.writable.getWriter();
+    w.write(raw); w.close();
+    return new Response(cs.readable).arrayBuffer().then(function (z) {
+      var idat = new Uint8Array(z);
+      function crc32(buf) {
+        var c, t = crc32.t;
+        if (!t) {
+          t = crc32.t = new Int32Array(256);
+          for (var m = 0; m < 256; m++) {
+            c = m;
+            for (var k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+            t[m] = c;
+          }
+        }
+        c = -1;
+        for (var q = 0; q < buf.length; q++) c = t[(c ^ buf[q]) & 255] ^ (c >>> 8);
+        return (c ^ -1) >>> 0;
+      }
+      function chunk(type, data) {
+        var out = new Uint8Array(12 + data.length);
+        var dv = new DataView(out.buffer);
+        dv.setUint32(0, data.length, false);
+        for (var i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+        out.set(data, 8);
+        dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)), false);
+        return out;
+      }
+      var ihdr = new Uint8Array(13);
+      var hv = new DataView(ihdr.buffer);
+      hv.setUint32(0, n, false); hv.setUint32(4, n, false);
+      ihdr[8] = 16;   // bit depth
+      ihdr[9] = 0;    // greyscale
+      var parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+                   chunk('IHDR', ihdr), chunk('IDAT', idat),
+                   chunk('IEND', new Uint8Array(0))];
+      var total = parts.reduce(function (a, p) { return a + p.length; }, 0);
+      var png = new Uint8Array(total), off = 0;
+      parts.forEach(function (p) { png.set(p, off); off += p.length; });
+
+      return TS.decode.png(png.buffer, 'deep.png').then(function (s) {
+        assert(s.maxValue === 65535, 'maxValue should be 65535, got ' + s.maxValue);
+        assert(s.channels === 1, 'channels');
+        assert(s.data[0] === 0, 'first sample');
+        assert(s.data[1] === 1, 'a 1-level step must survive (got ' + s.data[1] + ')');
+        var last = s.data[(n - 1) * n + (n - 1)];
+        assert(last === (n - 1) * 4096 + (n - 1), 'last sample ' + last);
+        return '16-bit intact: ' + s.data[1] + ', ' + last;
+      });
+    });
+  });
+});
+
+chain = chain.then(function () {
+  return check('.tsu re-imports as a source (row order flipped back)', function () {
+    var n = 32, g = synthGrid(n);
+    return TS.tsu.write({ N: n, L: 5000, data: g, name: 'again' })
+      .then(function (b) { return new File([b], 'again.tsu'); })
+      .then(function (f) { return TS.decode.file(f); })
+      .then(function (s) {
+        assert(s.units === 'm', 'units');
+        assert(s.tsuFlipped, 'should be marked as south-first');
+        near(s.georef.mPerPxX, 5000 / n, 0.01, 'cell size');
+        return s.note;
+      });
+  });
+});
+
+// ------------------------------------------------------------- pipeline ----
+
+function loadSynth(cellDeg) {
+  var n = 96, g = synthGrid(n);
+  var s = TS.decode.asciiGrid(asciiFromGrid(g, n, cellDeg || 0.001), 'synth.asc');
+  T.setSource(s);
+  return s;
+}
+
+chain = chain.then(function () {
+  return check('importer builds a sane map from a georeferenced source', function () {
+    TS.importer.open({});
+    loadSynth();
+    var m = T.build(128);
+    assert(m.N === 128, 'N');
+    assert(m.L > 3000 && m.L < 12000, 'domain came out at ' + Math.round(m.L) + ' m');
+    var lo = Infinity, hi = -Infinity, wet = 0;
+    for (var k = 0; k < m.data.length; k++) {
+      lo = Math.min(lo, m.data[k]); hi = Math.max(hi, m.data[k]);
+      if (m.data[k] < 0) wet++;
+    }
+    assert(hi > 20, 'no land: max ' + hi);
+    assert(lo < -10, 'no sea: min ' + lo);
+    var frac = wet / m.data.length;
+    assert(frac > 0.15 && frac < 0.85, 'water fraction ' + frac.toFixed(2));
+    return 'L=' + (m.L / 1000).toFixed(2) + ' km, ' + lo.toFixed(0) + '..' +
+      hi.toFixed(0) + ' m, ' + Math.round(frac * 100) + '% water';
+  });
+});
+
+chain = chain.then(function () {
+  return check('row 0 of the output is the SOUTH (wave-entry) edge', function () {
+    var m = T.build(128);
+    var n = m.N, southMean = 0, northMean = 0;
+    for (var i = 0; i < n; i++) {
+      southMean += m.data[i];
+      northMean += m.data[(n - 1) * n + i];
+    }
+    southMean /= n; northMean /= n;
+    assert(southMean < 0, 'south edge should be water, got ' + southMean.toFixed(1));
+    assert(northMean > 0, 'north edge should be land, got ' + northMean.toFixed(1));
+    return 'south ' + southMean.toFixed(0) + ' m, north +' + northMean.toFixed(0) + ' m';
+  });
+});
+
+chain = chain.then(function () {
+  return check('"wave from N" flips the map end to end', function () {
+    T.box.angle = -Math.PI;                 // 180 deg = wave from the north
+    var m = T.build(128);
+    var n = m.N, southMean = 0;
+    for (var i = 0; i < n; i++) southMean += m.data[i];
+    southMean /= n;
+    assert(southMean > 0, 'after flipping, the entry edge should be the hills: ' +
+      southMean.toFixed(1));
+    T.box.angle = 0;
+    return 'entry edge is now +' + southMean.toFixed(0) + ' m (the hills)';
+  });
+});
+
+chain = chain.then(function () {
+  return check('all four "wave from" directions aim the right edge', function () {
+    // An east-west ramp: water in the west, land in the east. Whichever compass
+    // side we aim at must end up as row 0 of the output.
+    var n = 64, g = new Float32Array(n * n);
+    for (var j = 0; j < n; j++) {
+      for (var i = 0; i < n; i++) g[j * n + i] = (i / (n - 1) - 0.5) * 100;
+    }
+    var s = TS.decode.asciiGrid(asciiFromGrid(g, n, 0.001), 'ew.asc');
+    T.setSource(s);
+    T.cfg.bathy = false; T.cfg.flatten = false; T.cfg.clampDepth = false;
+
+    function entryMean(deg) {
+      T.box.angle = deg * Math.PI / 180;
+      var m = T.build(96), N = m.N, sum = 0;
+      for (var i = 0; i < N; i++) sum += m.data[i];
+      return sum / N;
+    }
+    var e = entryMean(90), w = entryMean(270), sN = entryMean(0), nN = entryMean(180);
+    assert(e > 20, 'wave from E should enter over land (+50), got ' + e.toFixed(1));
+    assert(w < -20, 'wave from W should enter over water (-50), got ' + w.toFixed(1));
+    near(sN, 0, 3, 'wave from S enters mid-ramp');
+    near(nN, 0, 3, 'wave from N enters mid-ramp');
+    T.box.angle = 0;
+    return 'E ' + e.toFixed(0) + ' m · W ' + w.toFixed(0) + ' m · N/S ~0 m';
+  });
+});
+
+chain = chain.then(function () {
+  return check('bathymetry synthesis spares inland lakes', function () {
+    // Flat-shore source: land only, everything at/below 0 offshore.
+    var n = 96, g = synthGrid(n);
+    for (var k = 0; k < n * n; k++) if (g[k] < 0) g[k] = 0;   // strip the seabed
+    var s = TS.decode.asciiGrid(asciiFromGrid(g, n, 0.001), 'flat.asc');
+    T.setSource(s);
+    T.cfg.bathy = true;
+    T.cfg.shelfSlope = 20;
+    T.cfg.shelfDepth = 60;
+    T.cfg.flatten = false;
+    var m = T.build(160);
+    var N = m.N;
+    // The offshore band (south) must now be deep...
+    var deep = 0;
+    for (var i = 0; i < N; i++) if (m.data[i] < -20) deep++;
+    assert(deep > N * 0.7, 'offshore was not deepened (' + deep + '/' + N + ')');
+    // ...while the inland lake (around 78% north, mid-map) must stay shallow.
+    var j = Math.round(N * 0.78), lakeMin = 0;
+    for (var q = Math.round(N * 0.33); q < Math.round(N * 0.47); q++) {
+      lakeMin = Math.min(lakeMin, m.data[j * N + q]);
+    }
+    assert(lakeMin > -20, 'the inland lake was gouged to ' + lakeMin.toFixed(1) + ' m');
+    return 'offshore ' + deep + '/' + N + ' cells deep, lake floor ' +
+      lakeMin.toFixed(1) + ' m';
+  });
+});
+
+chain = chain.then(function () {
+  return check('entry-strip levelling guarantees water at row 0', function () {
+    var n = 96, g = synthGrid(n);
+    // Put a sandbar right across the wave-entry edge.
+    for (var i = 0; i < n; i++) for (var j = 0; j < 4; j++) g[j * n + i] = 3;
+    var s = TS.decode.asciiGrid(asciiFromGrid(g, n, 0.001), 'bar.asc');
+    T.setSource(s);
+    T.cfg.bathy = true; T.cfg.flatten = true;
+    var m = T.build(128);
+    var N = m.N, dry = 0;
+    for (var q = 0; q < N; q++) if (m.data[q] >= 0) dry++;
+    assert(dry === 0, dry + ' of ' + N + ' entry cells are still dry');
+    return 'all ' + N + ' entry cells wet';
+  });
+});
+
+chain = chain.then(function () {
+  return check('depth clamp is respected', function () {
+    loadSynth();
+    T.cfg.clampDepth = true;
+    T.cfg.maxDepth = 35;
+    var m = T.build(128);
+    var lo = Infinity;
+    for (var k = 0; k < m.data.length; k++) lo = Math.min(lo, m.data[k]);
+    assert(lo >= -35.001, 'clamp leaked: ' + lo);
+    T.cfg.maxDepth = 200;
+    return 'deepest ' + lo.toFixed(1) + ' m';
+  });
+});
+
+chain = chain.then(function () {
+  return check('greyscale mapping: sea level + peak height land where asked', function () {
+    var n = 64;
+    var u = new Uint16Array(n * n);
+    for (var j = 0; j < n; j++) {
+      for (var i = 0; i < n; i++) u[j * n + i] = Math.round(65535 * j / (n - 1));
+    }
+    var s = TS.decode.raw(u.buffer, 'ramp.r16');
+    T.setSource(s);
+    T.cfg.widthKm = 10;
+    T.cfg.seaRaw = 65535 * 0.25;      // shoreline a quarter of the way up
+    T.cfg.topM = 400;                 // brightest pixel = 400 m
+    T.cfg.bathy = false;
+    T.cfg.clampDepth = false;
+    T.cfg.flatten = false;
+    var m = T.build(128);
+    var hi = -Infinity;
+    for (var k = 0; k < m.data.length; k++) hi = Math.max(hi, m.data[k]);
+    near(hi, 400, 8, 'peak height');
+    near(m.L, 10000, 1, 'domain width');
+    // The ramp brightens downward in image space, and image-bottom becomes the
+    // sim's SOUTH edge — so the bright (high) end lands at the wave-entry edge
+    // and the sea is in the north quarter. Shoreline sits 75% up from the south.
+    var N = m.N, shore = -1;
+    for (var j2 = N - 1; j2 >= 0; j2--) {
+      if (m.data[j2 * N + (N >> 1)] >= 0) { shore = j2; break; }
+    }
+    near(shore / N, 0.75, 0.03, 'shoreline position');
+    return 'peak ' + hi.toFixed(0) + ' m, shoreline ' +
+      (100 * shore / N).toFixed(0) + '% north of the wave edge';
+  });
+});
+
+chain = chain.then(function () {
+  return check('full-resolution build stays interactive', function () {
+    loadSynth();
+    var t0 = performance.now();
+    var m = T.build(1024);
+    var ms = performance.now() - t0;
+    assert(m.data.length === 1024 * 1024, 'size');
+    assert(ms < 6000, 'took ' + ms.toFixed(0) + ' ms');
+    // Headless virtual time freezes performance.now(), so 0 ms here means
+    // "not measured" rather than "instant" — open this page in a real browser
+    // for the honest number.
+    return '1024² built' + (ms > 0 ? ' in ' + ms.toFixed(0) + ' ms' : ' (timer idle headless)');
+  });
+});
+
+chain = chain.then(function () {
+  return check('exported map survives the round trip into the sim format', function () {
+    loadSynth();
+    var m = T.build(256);
+    return TS.tsu.write(m, {}).then(function (b) { return b.arrayBuffer(); })
+      .then(function (ab) { return TS.tsu.read(ab, 'x.tsu'); })
+      .then(function (r) {
+        assert(r.N === 256, 'N');
+        near(r.L, m.L, 0.01, 'L');
+        for (var k = 0; k < 256 * 256; k += 997) {
+          if (r.data[k] !== m.data[k]) throw new Error('mismatch at ' + k);
+        }
+        return 'identical after write/read';
+      });
+  });
+});
+
+chain.then(function () {
+  TS.importer.close();
+  var s = document.getElementById('sum');
+  s.textContent = pass + ' passed, ' + fail + ' failed';
+  s.style.color = fail ? '#e5544b' : '#5fd39a';
+  document.title = (fail ? 'FAIL ' : 'OK ') + pass + '/' + (pass + fail);
+});
+</script>
+</body>
+</html>

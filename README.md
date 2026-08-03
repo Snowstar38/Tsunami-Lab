@@ -5,12 +5,10 @@ depth-averaged equations real tsunami models use) on a GPU grid, over procedural
 generated coastal terrain, with an orbitable 3D view, an overhead topo view, and a
 record-and-scrub replay timeline.
 
-**Run it:** open `index.html` in a modern desktop browser (Chrome/Edge/Firefox).
+**Run it:** Either go to https://github.com/Snowstar38/Tsunami-Lab or download the repo
+and open `index.html` in a modern desktop browser (Chrome/Edge/Firefox).
 No install, no server, no network. Requires WebGL2 with float render targets
 (any modern desktop GPU).
-
-**Share it:** the folder is GitHub Pages-ready as-is — push it to a repo, enable
-Pages, done.
 
 ## Using it
 
@@ -24,8 +22,10 @@ Pages, done.
 5. The **max inundation** overlay (2D) shows everywhere water reached, after it
    recedes — the red line is the run-up limit.
 
+2D controls: drag to pan · scroll to zoom (up to 40×) · double-click to reset.
 3D controls: left-drag orbit · wheel zoom · right-drag (or shift-drag) pan.
-Space = start/pause.
+Space = start/pause. Zooming the 2D map works during a live run and while
+scrubbing the replay.
 
 - Same seed = same coastline at every resolution: preview a seed at 512, then rerun
   it at 4096.
@@ -39,9 +39,44 @@ Space = start/pause.
 
 ## Real-world terrain
 
-`fetch_terrain.py` (pure stdlib Python) downloads merged land+seabed elevation from
-the GMRT synthesis (~100 m resolution, no API key) and writes a `.tsu` file for the
-**Load heightmap…** button:
+### Make a heightmap… (no install needed)
+
+The **Make a heightmap…** button opens an importer that turns terrain data into a
+map this sim can flood. Two ways in:
+
+- **Fetch real terrain** — type a latitude, longitude and width, and it pulls
+  merged land + seabed elevation straight from the GMRT synthesis in the browser.
+  No API key, no account, no download step. This is the best option, because it
+  comes with *real bathymetry*.
+- **Your file** — drop in a heightmap: PNG (8- or 16-bit), JPG, ESRI ASCII `.asc`,
+  SRTM `.hgt`, raw `.raw`/`.r16`, or an existing `.tsu` you want to re-crop.
+  16-bit PNGs are decoded properly (canvas would crush them to 256 height steps).
+  RGB tile encodings — Mapbox Terrain-RGB and Mapzen Terrarium — are decoded as
+  true meters.
+
+The importer's real job is not reading files, it's **giving the numbers meaning**.
+An image heightmap has no vertical datum and no seabed, so you get:
+
+- a **sea level** slider — drag it and watch the coastline move to where it belongs;
+- **height of the highest point**, which fixes the vertical scale;
+- **seabed synthesis** — slopes the sea floor away from every coast so the wave has
+  something to travel through, leaving inland lakes alone;
+- a **crop box** you drag, scroll to resize and shift-drag to rotate, with the
+  wave-entry edge lit up and arrows showing which way the tsunami will run;
+- **Wave from S/E/N/W** buttons that snap the crop so that compass side becomes the
+  edge the wave enters from;
+- live warnings — a wave-entry edge that is mostly land, cells too coarse to
+  resolve an inlet, a depth that will crush the timestep, an 8-bit source that
+  will terrace.
+
+The right-hand panel shows what you are actually going to get: domain size, cell
+size, water fraction, entry-edge depth, and the estimated timestep. **Use in the
+sim** loads it immediately; **Save .tsu** writes a file you can reload or share.
+
+### fetch_terrain.py (command line)
+
+`fetch_terrain.py` (pure stdlib Python) does the same GMRT download from a shell,
+which is handy for scripting or very large areas:
 
 ```
 python fetch_terrain.py --lat 41.75 --lon -70.10 --width-km 68 \
@@ -53,7 +88,19 @@ side (the wave always enters at the bottom edge of the sim). `--max-depth` clamp
 abyssal water, which keeps the timestep healthy. Loaded maps set their own domain
 size; the resolution dropdown still works (the map is resampled). **Regenerate**
 returns to procedural terrain. `capecod.tsu` (wave from the Sound) and
-`capecod-atlantic.tsu` (wave from the open Atlantic) ship in this folder.
+`capecod-atlantic.tsu` (wave from the open Atlantic) ship in this folder as
+worked examples.
+
+### The .tsu format
+
+`TSU1` — `'TSU1'`, uint32 N, float32 domain width in meters, then N×N float32
+elevations (meters, sea level 0, row 0 = the wave-entry edge). Still read.
+
+`TSU2` — what the importer writes: `'TSU2'`, uint32 header length, a UTF-8 JSON
+header (grid size, domain width, name, source, coordinates, datum), then the same
+float32 payload, deflate-compressed. Real terrain typically lands around 30% of
+the raw size, so a 1024² map is ~1.2 MB instead of 4 MB. Both formats load through
+the same button.
 
 ## How it works (short version)
 
@@ -65,6 +112,6 @@ All physics runs in WebGL2 fragment shaders on RGBA32F ping-pong textures.
 Replay snapshots are downsampled on GPU, quantized to Uint16 on CPU, and
 re-interpolated on scrub. See `SPEC.md` for the architecture contract.
 
-Built by Claude (Fable 5 + three Opus 5 subagents) for Michelle, August 2026.
+Built by Claude (Fable 5 and Opus 5, with Opus 5 subagents), August 2026.
 Phase 2 (planned): trees, buildings, seawalls + fragility damage, erosion &
 sediment transport, debris, before/after slider.

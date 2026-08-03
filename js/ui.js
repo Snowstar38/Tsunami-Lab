@@ -209,7 +209,7 @@ TS.ui = (function () {
   var CALLBACK_NAMES = ['onRegenerate', 'onResolutionChange', 'onWaveChange',
     'onManningChange', 'onStart', 'onPause', 'onReset', 'onViewMode', 'onExaggeration',
     'onOverlayMaxExtent', 'onScrub', 'onLive', 'onReplayPlay', 'onReplayPause', 'onTurbo',
-    'onLoadTerrain', 'onRotateView', 'onOutlineChange',
+    'onLoadTerrain', 'onOpenImporter', 'onRotateView', 'onResetView', 'onOutlineChange',
     'onPresetSelect', 'onPresetSave', 'onPresetDelete', 'onPresetExport'];
 
   // --- state -----------------------------------------------------------------
@@ -299,18 +299,22 @@ TS.ui = (function () {
       cb.onRegenerate(terrainParams());
     });
 
-    // Real-world heightmaps (.tsu from fetch_terrain.py)
+    // Real-world heightmaps: a saved .tsu, or build one from any terrain file.
     var loadRow = add(g, el('div', 'ts-row'));
     loadRow.style.marginTop = '6px';
     var file = add(loadRow, el('input'));
     file.type = 'file';
-    file.accept = '.tsu';
+    file.accept = '.tsu,.tsu2';
     file.style.display = 'none';
     button(loadRow, 'Load heightmap…', 'wide', function () { file.click(); });
     file.addEventListener('change', function () {
       if (file.files && file.files[0]) cb.onLoadTerrain(file.files[0]);
       file.value = '';
     });
+    var makeRow = add(g, el('div', 'ts-row'));
+    button(makeRow, '🗺 Make a heightmap…', 'wide', function () { cb.onOpenImporter(); });
+    add(g, el('div', 'ts-hint', 'Import your own terrain, or fetch real land + ' +
+      'seabed by coordinates.'));
     ctl.mapname = add(g, el('div', 'ts-hint', ''));
     ctl.mapname.style.display = 'none';
 
@@ -372,7 +376,9 @@ TS.ui = (function () {
     ctl.outline = checkbox(g, 'Original coastline', d.outline !== false,
       function (v) { cb.onOutlineChange(v); });
     var rotRow = add(g, el('div', 'ts-row'));
-    button(rotRow, 'Rotate 2D view ⟳', 'wide', function () { cb.onRotateView(); });
+    button(rotRow, 'Rotate 2D ⟳', 'wide', function () { cb.onRotateView(); });
+    button(rotRow, 'Reset view', 'wide', function () { cb.onResetView(); });
+    add(g, el('div', 'ts-hint', '2D: drag to pan · scroll to zoom · double-click to reset.'));
   }
 
   function setViewMode(mode, fire) {
